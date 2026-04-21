@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS commands (
 	raw_command TEXT NOT NULL,
 	normalized_command TEXT NOT NULL,
 	command_family TEXT NOT NULL,
+	parser_used TEXT NOT NULL DEFAULT '',
 	cwd TEXT NOT NULL,
 	repo_root TEXT NOT NULL,
 	git_branch TEXT NOT NULL,
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS commands (
 	exit_code INTEGER,
 	status TEXT NOT NULL,
 	summary_short TEXT NOT NULL DEFAULT '',
+	structured_summary TEXT NOT NULL DEFAULT '',
 	raw_output_id INTEGER,
 	redacted_output_id INTEGER,
 	FOREIGN KEY(session_id) REFERENCES sessions(id)

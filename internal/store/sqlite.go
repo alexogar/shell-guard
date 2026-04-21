@@ -99,14 +99,15 @@ func (s *Store) GetLatestSession(ctx context.Context) (*types.Session, error) {
 func (s *Store) CreateCommandStart(ctx context.Context, command types.CommandRecord) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO commands (
-			session_id, raw_command, normalized_command, command_family, cwd, repo_root, git_branch, git_dirty,
-			started_at, status, summary_short
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			session_id, raw_command, normalized_command, command_family, parser_used, cwd, repo_root, git_branch, git_dirty,
+			started_at, status, summary_short, structured_summary
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		command.SessionID,
 		command.RawCommand,
 		command.NormalizedCommand,
 		command.CommandFamily,
+		command.ParserUsed,
 		command.CWD,
 		command.RepoRoot,
 		command.GitBranch,
@@ -114,6 +115,7 @@ func (s *Store) CreateCommandStart(ctx context.Context, command types.CommandRec
 		command.StartedAt.UTC(),
 		string(command.Status),
 		command.SummaryShort,
+		command.StructuredSummary,
 	)
 	if err != nil {
 		return 0, err
@@ -124,9 +126,10 @@ func (s *Store) CreateCommandStart(ctx context.Context, command types.CommandRec
 func (s *Store) CompleteCommand(ctx context.Context, command *types.CommandRecord) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE commands
-		SET cwd = ?, repo_root = ?, git_branch = ?, git_dirty = ?, finished_at = ?, duration_ms = ?, exit_code = ?, status = ?, summary_short = ?, raw_output_id = ?, redacted_output_id = ?
+		SET parser_used = ?, cwd = ?, repo_root = ?, git_branch = ?, git_dirty = ?, finished_at = ?, duration_ms = ?, exit_code = ?, status = ?, summary_short = ?, structured_summary = ?, raw_output_id = ?, redacted_output_id = ?
 		WHERE id = ?
 	`,
+		command.ParserUsed,
 		command.CWD,
 		command.RepoRoot,
 		command.GitBranch,
@@ -136,6 +139,7 @@ func (s *Store) CompleteCommand(ctx context.Context, command *types.CommandRecor
 		intPtrValue(command.ExitCode),
 		string(command.Status),
 		command.SummaryShort,
+		command.StructuredSummary,
 		int64PtrValue(command.RawOutputID),
 		int64PtrValue(command.RedactedOutputID),
 		command.ID,
@@ -263,6 +267,14 @@ func (s *Store) runMigrations(ctx context.Context) error {
 		}
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("run migration statement: %w", err)
+		}
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE commands ADD COLUMN parser_used TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE commands ADD COLUMN structured_summary TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("run compatibility migration: %w", err)
 		}
 	}
 	return nil

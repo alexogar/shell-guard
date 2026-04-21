@@ -44,6 +44,7 @@ type CommandRecord struct {
 	RawCommand        string        `json:"raw_command"`
 	NormalizedCommand string        `json:"normalized_command"`
 	CommandFamily     string        `json:"command_family"`
+	ParserUsed        string        `json:"parser_used"`
 	CWD               string        `json:"cwd"`
 	RepoRoot          string        `json:"repo_root"`
 	GitBranch         string        `json:"git_branch"`
@@ -54,6 +55,7 @@ type CommandRecord struct {
 	ExitCode          *int          `json:"exit_code,omitempty"`
 	Status            CommandStatus `json:"status"`
 	SummaryShort      string        `json:"summary_short"`
+	StructuredSummary string        `json:"structured_summary,omitempty"`
 	RawOutputID       *int64        `json:"raw_output_id,omitempty"`
 	RedactedOutputID  *int64        `json:"redacted_output_id,omitempty"`
 }

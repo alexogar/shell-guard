@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/creack/pty"
 
 	"shell-guard/internal/config"
+	"shell-guard/internal/parsers"
 	"shell-guard/internal/state"
 	"shell-guard/internal/store"
 	"shell-guard/internal/types"
@@ -26,25 +28,29 @@ import (
 
 const markerPrefix = "\n__SHG__|"
 
+var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+
 type Manager struct {
 	cfg    config.Config
 	store  *store.Store
+	reg    *parsers.Registry
 	mu     sync.Mutex
 	active *ManagedSession
 }
 
 type ManagedSession struct {
-	cfg        config.Config
-	store      *store.Store
-	mu         sync.Mutex
-	session    types.Session
-	cmd        *exec.Cmd
-	ptmx       *os.File
-	conn       net.Conn
-	done       chan struct{}
-	parser     markerStream
-	current    *runningCommand
-	readErr    error
+	cfg            config.Config
+	store          *store.Store
+	registry       *parsers.Registry
+	mu             sync.Mutex
+	session        types.Session
+	cmd            *exec.Cmd
+	ptmx           *os.File
+	conn           net.Conn
+	done           chan struct{}
+	parser         markerStream
+	current        *runningCommand
+	readErr        error
 	integrationDir string
 }
 
@@ -74,7 +80,7 @@ type spillBuffer struct {
 }
 
 func NewManager(cfg config.Config, st *store.Store) (*Manager, error) {
-	return &Manager{cfg: cfg, store: st}, nil
+	return &Manager{cfg: cfg, store: st, reg: parsers.DefaultRegistry()}, nil
 }
 
 func (m *Manager) StartSession(shellPath, cwd string, rows, cols int) (*ManagedSession, error) {
@@ -127,12 +133,13 @@ func (m *Manager) StartSession(shellPath, cwd string, rows, cols int) (*ManagedS
 	}
 
 	managed := &ManagedSession{
-		cfg:        m.cfg,
-		store:      m.store,
-		session:    info,
-		cmd:        cmd,
-		ptmx:       ptmx,
-		done:       make(chan struct{}),
+		cfg:            m.cfg,
+		store:          m.store,
+		registry:       m.reg,
+		session:        info,
+		cmd:            cmd,
+		ptmx:           ptmx,
+		done:           make(chan struct{}),
 		integrationDir: integrationDir,
 	}
 	m.active = managed
@@ -347,6 +354,7 @@ func (s *ManagedSession) endCommand(mark marker) {
 		if outputErr == nil {
 			current.record.RawOutputID = &outputID
 		}
+		s.applyParserResult(&current.record, body, path, storageType)
 	}
 
 	_ = s.store.CompleteCommand(context.Background(), &current.record)
@@ -367,6 +375,42 @@ func (s *ManagedSession) endCommand(mark marker) {
 	s.session.UpdatedAt = time.Now().UTC()
 	s.mu.Unlock()
 	_ = s.store.UpdateSession(context.Background(), &s.session)
+}
+
+func (s *ManagedSession) applyParserResult(record *types.CommandRecord, body, path string, storageType types.StorageType) {
+	if s.registry == nil || record.ExitCode == nil {
+		return
+	}
+
+	output := body
+	if storageType == types.StorageTypeFile && path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return
+		}
+		output = string(data)
+	}
+
+	commandName, args := splitCommand(record.RawCommand)
+	result, ok := s.registry.Parse(parsers.Context{
+		RawCommand:  record.RawCommand,
+		CommandName: commandName,
+		Args:        args,
+		CWD:         record.CWD,
+		RepoRoot:    record.RepoRoot,
+		GitBranch:   record.GitBranch,
+		GitDirty:    record.GitDirty,
+		ExitCode:    *record.ExitCode,
+		Output:      normalizeParserOutput(output),
+		DurationMS:  record.DurationMS,
+	})
+	if !ok {
+		return
+	}
+
+	record.ParserUsed = result.Name
+	record.SummaryShort = result.SummaryShort
+	record.StructuredSummary = result.StructuredSummary
 }
 
 func (s *ManagedSession) finish(waitErr error) {
@@ -508,6 +552,30 @@ func repoRootOrCWD(repoRoot, cwd string) string {
 		return repoRoot
 	}
 	return cwd
+}
+
+func splitCommand(raw string) (string, []string) {
+	fields := strings.Fields(strings.TrimSpace(raw))
+	if len(fields) == 0 {
+		return "", nil
+	}
+	return filepath.Base(fields[0]), fields[1:]
+}
+
+func normalizeParserOutput(output string) string {
+	output = strings.ReplaceAll(output, "\r", "")
+	output = ansiEscapePattern.ReplaceAllString(output, "")
+	lines := strings.Split(output, "\n")
+	cleaned := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch trimmed {
+		case "", "%", "shg$":
+			continue
+		}
+		cleaned = append(cleaned, strings.TrimRight(line, " \t"))
+	}
+	return strings.Join(cleaned, "\n")
 }
 
 func (s *spillBuffer) Write(p []byte) (int, error) {
